@@ -1,3 +1,6 @@
+# Local-deployed databases
+*.db
+
 # Pre-commit packages
 .ruff_cache/
 

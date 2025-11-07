@@ -1,0 +1,4 @@
+fastapi[all]
+pwdlib[argon2]
+pyjwt
+sqlmodel
