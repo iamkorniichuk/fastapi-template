@@ -48,6 +48,15 @@ class SecuritySettings(BaseModel):
             "P0DT1H0M0S",
         ],
     )
+    refresh_token_ttl: timedelta = Field(
+        default=timedelta(days=90),
+        title="Refresh Token Expiration",
+        description="The time after which an issued refresh token will expire.",
+        examples=[
+            "P90DT0H0M0S",
+            "P30DT0H0M0S",
+        ],
+    )
 
 
 class AppSettings(BaseModel):

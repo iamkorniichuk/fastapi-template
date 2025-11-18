@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 from app.core.db import init_db
 from app.core.settings import get_settings
+from app.routers import auth
 
 
 @asynccontextmanager
@@ -20,3 +21,5 @@ app = FastAPI(
     version=version,
     lifespan=lifespan,
 )
+
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
