@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal, TypedDict
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 import jwt
@@ -6,7 +7,7 @@ from pwdlib import PasswordHash
 from pydantic import ValidationError
 from sqlmodel import select
 
-from app.core.dependencies import DbDep
+from app.core.dependencies import AuthCredentialsDep, DbDep
 from app.core.settings import get_settings
 from app.models.auth import RefreshToken
 from app.models.user import User, UserCreate
@@ -17,6 +18,17 @@ access_token_ttl = get_settings().security.access_token_ttl
 refresh_token_ttl = get_settings().security.refresh_token_ttl
 algorithm = get_settings().security.encode_algorithm
 secret_key = get_settings().security.secret_key
+
+
+TokenType = Literal["access"] | Literal["refresh"]
+
+
+class TokenPayload(TypedDict):
+    jti: str
+    sub: str
+    iat: float
+    exp: float
+    typ: TokenType
 
 
 def create_user(db: DbDep, username: str, password: str) -> User:
@@ -46,7 +58,7 @@ def validate_credentials(db: DbDep, username: str, password: str) -> User:
     user_exists = user is not None
     if not user_exists:
         raise HTTPException(
-            status_code=400, detail="User with this username doesn't exist"
+            status_code=401, detail="User with this username doesn't exist"
         )
 
     password_valid = hasher.verify(password, user.hashed_password)
@@ -56,51 +68,68 @@ def validate_credentials(db: DbDep, username: str, password: str) -> User:
     return user
 
 
-def validate_refresh_token(db: DbDep, refresh_token: str) -> RefreshToken:
+def decode_token(token: str, expected_type: TokenType) -> TokenPayload:
     try:
-        payload: dict = jwt.decode(refresh_token, secret_key, algorithms=[algorithm])
+        payload: dict = jwt.decode(token, secret_key, algorithms=[algorithm])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=400, detail="Refresh token has expired")
+        raise HTTPException(status_code=400, detail="Token has expired")
     except jwt.InvalidAlgorithmError:
-        raise HTTPException(status_code=400, detail="Invalid refresh token algorithm")
+        raise HTTPException(status_code=400, detail="Invalid token algorithm")
     except jwt.ImmatureSignatureError:
-        raise HTTPException(status_code=400, detail="Refresh token is not yet valid")
+        raise HTTPException(status_code=400, detail="Token is not yet valid")
     except jwt.DecodeError:
-        raise HTTPException(status_code=400, detail="Invalid refresh token")
+        raise HTTPException(status_code=400, detail="Invalid token")
 
-    token_id_hex = payload.get("jti")
-    payload_sufficient = token_id_hex is not None
+    payload_sufficient = (
+        payload.get("jti") is not None
+        and payload.get("sub") is not None
+        and payload.get("iat") is not None
+        and payload.get("exp") is not None
+        and payload.get("typ") is not None
+    )
     if not payload_sufficient:
         raise HTTPException(
-            status_code=400, detail="Refresh token payload is missing required fields"
+            status_code=400, detail="Token payload is missing required fields"
         )
 
-    token_id = UUID(token_id_hex)
+    type_correct = payload["typ"] == expected_type
+    if not type_correct:
+        raise HTTPException(status_code=400, detail="Token type is not correct")
+
+    return TokenPayload(**payload)
+
+
+def validate_refresh_token(db: DbDep, refresh_token: str) -> RefreshToken:
+    payload = decode_token(refresh_token, "refresh")
+
+    token_id = UUID(payload["jti"])
     query = select(RefreshToken).where(RefreshToken.id == token_id)
     token = db.exec(query).first()
     token_exists = token is not None
     if not token_exists:
-        raise HTTPException(status_code=400, detail="Refresh token not found")
+        raise HTTPException(status_code=401, detail="Token not found")
 
     token_valid = hasher.verify(refresh_token, token.hashed_token)
     if not token_valid:
-        raise HTTPException(status_code=400, detail="Invalid refresh token")
+        raise HTTPException(status_code=400, detail="Invalid token")
 
     if token.is_revoked:
-        raise HTTPException(status_code=400, detail="Refresh token has been revoked")
+        raise HTTPException(status_code=400, detail="Token has been revoked")
 
     now = datetime.now()
     is_token_expired = token.expires_at < now
     if is_token_expired:
-        raise HTTPException(status_code=400, detail="Refresh token has expired")
+        raise HTTPException(status_code=400, detail="Token has expired")
 
     return token
 
 
 def create_access_token(user_id: UUID) -> str:
+    token_id = uuid4()
     issued_at = datetime.now()
     expires_at = issued_at + access_token_ttl
     payload = {
+        "jti": token_id.hex,
         "sub": user_id.hex,
         "iat": issued_at.timestamp(),
         "exp": expires_at.timestamp(),
@@ -111,14 +140,14 @@ def create_access_token(user_id: UUID) -> str:
 
 
 def create_refresh_token(db: DbDep, user_id: UUID) -> str:
+    token_id = uuid4()
     issued_at = datetime.now()
     expires_at = issued_at + refresh_token_ttl
-    token_id = uuid4()
     payload = {
+        "jti": token_id.hex,
         "sub": user_id.hex,
         "iat": issued_at.timestamp(),
         "exp": expires_at.timestamp(),
-        "jti": token_id.hex,
         "typ": "refresh",
     }
 
@@ -152,3 +181,22 @@ def revoke_all_refresh_tokens(db: DbDep, user: User):
         obj.is_revoked = True
         db.add(obj)
     db.commit()
+
+
+def get_current_user(db: DbDep, credentials: AuthCredentialsDep):
+    credentials_provided = credentials is not None
+    if not credentials_provided:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token = credentials.credentials
+    payload = decode_token(token, "access")
+
+    user_id = UUID(payload["sub"])
+    query = select(User).where(User.id == user_id)
+    user = db.exec(query).first()
+
+    user_exists = user is not None
+    if not user_exists:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
