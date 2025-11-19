@@ -9,3 +9,4 @@ class RefreshToken(SQLModel, table=True):
     hashed_token: str = Field()
     expires_at: datetime = Field()
     created_at: datetime = Field(default_factory=datetime.now)
+    is_revoked: bool = Field(default=False)

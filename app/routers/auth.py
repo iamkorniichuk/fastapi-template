@@ -57,18 +57,7 @@ def sign_up(db: DbDep, auth_form: AuthFormDep):
 
 @router.post("/login")
 def login(db: DbDep, auth_form: AuthFormDep):
-    query = select(User).where(User.username == auth_form.username)
-    user = db.exec(query).first()
-    user_exists = user is not None
-    if not user_exists:
-        raise HTTPException(
-            status_code=400, detail="User with this username doesn't exist"
-        )
-
-    password_valid = hasher.verify(auth_form.password, user.hashed_password)
-    if not password_valid:
-        raise HTTPException(status_code=400, detail="Incorrect password")
-
+    user = _validate_credentials(db, auth_form.username, auth_form.password)
     refresh_token = _create_refresh_token(user.id, db, commit=True)
     access_token = _create_access_token(user.id)
     return ReadAuthToken(access_token=access_token, refresh_token=refresh_token)
@@ -76,10 +65,54 @@ def login(db: DbDep, auth_form: AuthFormDep):
 
 @router.post("/refresh")
 def refresh(db: DbDep, data: CreateRefreshToken):
-    try:
-        payload: dict = jwt.decode(
-            data.refresh_token, secret_key, algorithms=[algorithm]
+    token = _validate_refresh_token(db, data.refresh_token)
+
+    user_id = token.user_id
+    refresh_token = _create_refresh_token(user_id, db, commit=True)
+    access_token = _create_access_token(user_id)
+    return ReadAuthToken(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/logout", status_code=204)
+def logout(db: DbDep, data: CreateRefreshToken):
+    token = _validate_refresh_token(db, data.refresh_token)
+    token.is_revoked = True
+
+    db.add(token)
+    db.commit()
+
+
+@router.post("/logout-all", status_code=204)
+def logout_all(db: DbDep, auth_form: AuthFormDep):
+    user = _validate_credentials(db, auth_form.username, auth_form.password)
+    query = select(RefreshToken).where(RefreshToken.user_id == user.id)
+
+    tokens = db.exec(query).all()
+    for obj in tokens:
+        obj.is_revoked = True
+        db.add(obj)
+    db.commit()
+
+
+def _validate_credentials(db: DbDep, username: str, password: str) -> User:
+    query = select(User).where(User.username == username)
+    user = db.exec(query).first()
+    user_exists = user is not None
+    if not user_exists:
+        raise HTTPException(
+            status_code=400, detail="User with this username doesn't exist"
         )
+
+    password_valid = hasher.verify(password, user.hashed_password)
+    if not password_valid:
+        raise HTTPException(status_code=400, detail="Incorrect password")
+
+    return user
+
+
+def _validate_refresh_token(db: DbDep, refresh_token: str) -> RefreshToken:
+    try:
+        payload: dict = jwt.decode(refresh_token, secret_key, algorithms=[algorithm])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=400, detail="Refresh token has expired")
     except jwt.InvalidAlgorithmError:
@@ -90,8 +123,7 @@ def refresh(db: DbDep, data: CreateRefreshToken):
         raise HTTPException(status_code=400, detail="Invalid refresh token")
 
     token_id_hex = payload.get("jti")
-    user_id_hex = payload.get("sub")
-    payload_sufficient = token_id_hex is not None and user_id_hex is not None
+    payload_sufficient = token_id_hex is not None
     if not payload_sufficient:
         raise HTTPException(
             status_code=400, detail="Refresh token payload is missing required fields"
@@ -104,19 +136,19 @@ def refresh(db: DbDep, data: CreateRefreshToken):
     if not token_exists:
         raise HTTPException(status_code=400, detail="Refresh token not found")
 
-    token_valid = hasher.verify(data.refresh_token, token.hashed_token)
+    token_valid = hasher.verify(refresh_token, token.hashed_token)
     if not token_valid:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
+
+    if token.is_revoked:
+        raise HTTPException(status_code=400, detail="Refresh token has been revoked")
 
     now = datetime.now()
     is_token_expired = token.expires_at < now
     if is_token_expired:
         raise HTTPException(status_code=400, detail="Refresh token has expired")
 
-    user_id = UUID(user_id_hex)
-    refresh_token = _create_refresh_token(user_id, db, commit=True)
-    access_token = _create_access_token(user_id)
-    return ReadAuthToken(access_token=access_token, refresh_token=refresh_token)
+    return token
 
 
 def _create_access_token(user_id: UUID) -> str:
@@ -129,7 +161,7 @@ def _create_access_token(user_id: UUID) -> str:
         "typ": "access",
     }
 
-    return jwt.encode(payload, secret_key, algorithm)
+    return jwt.encode(payload, secret_key, algorithm=algorithm)
 
 
 def _create_refresh_token(
@@ -148,7 +180,7 @@ def _create_refresh_token(
         "typ": "refresh",
     }
 
-    token = jwt.encode(payload, secret_key, algorithm)
+    token = jwt.encode(payload, secret_key, algorithm=algorithm)
     if not commit or db is None:
         return token
 
