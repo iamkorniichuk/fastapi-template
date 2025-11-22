@@ -11,7 +11,7 @@ source ./venv/bin/activate
 
 Then, download all packages needed for running and developing the application:
 ```bash
-pip install -r requirements.txt dev-requirements.txt
+pip install -r requirements.txt -r dev-requirements.txt
 ```
 
 ### 2. Environment Settings
