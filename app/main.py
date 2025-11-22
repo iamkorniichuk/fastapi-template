@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from app.core.db import init_db
 from app.core.settings import get_settings
 from app.api.auth import routes as auth_routes
+from app.api.users import routes as users_routes
 
 
 @asynccontextmanager
@@ -23,3 +24,4 @@ app = FastAPI(
 )
 
 app.include_router(auth_routes.router, prefix="/auth", tags=["Auth"])
+app.include_router(users_routes.router, prefix="/users", tags=["Users"])
